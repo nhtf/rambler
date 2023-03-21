@@ -1,102 +1,188 @@
-use clap::{Parser, Subcommand};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
+use serde_json::{json, Value};
+use rust_socketio::payload::Payload;
 use std::collections::HashMap;
-use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
 
-#[derive(Parser, Debug)]
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+#[derive(clap::Parser, Debug)]
 struct Args {
+    #[arg(short, long)]
+    input: Vec<PathBuf>,
+    #[arg(short, long)]
+    data_set: Option<PathBuf>,
+    #[arg(long)]
+    depth: Option<usize>,
     #[command(subcommand)]
     action: Action,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(clap::Subcommand, Debug)]
 enum Action {
-    DataSet {
-        #[arg(short, long)]
-        input: Vec<PathBuf>,
+    Write {
         #[arg(short, long)]
         output: PathBuf,
     },
     Generate {
         #[arg(short, long)]
-        data_set: PathBuf,
-        #[arg(short, long)]
         text: String,
     },
+    Bot(BotArgs),
 }
 
-#[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(clap::Args, Debug)]
+struct BotArgs {
+    #[arg(short, long)]
+    key: String,
+    #[arg(short, long)]
+    room: Vec<u64>,
+}
+
+#[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Debug)]
 struct Token(String);
 
-#[serde_as]
+#[derive(Serialize, Deserialize)]
+struct DataNode {
+    #[serde(default = "one")]
+    #[serde(skip_serializing_if = "is_one")]
+    #[serde(rename = "")]
+    weight: usize,
+    #[serde(flatten)]
+    map: HashMap<Token, DataNode>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct DataSet {
-    #[serde_as(as = "Vec<(_, _)>")]
-    hash_map: HashMap<Vec<Token>, HashMap<Token, usize>>,
+    root: DataNode,
 }
 
 struct Generator {
     max: usize,
-    context: usize,
+    depth: usize,
     data_set: DataSet,
+}
+
+fn one() -> usize {
+    1
+}
+
+fn is_one(v: &usize) -> bool {
+    *v == 1
 }
 
 impl Token {
     fn split(input: &str) -> Vec<Token> {
-        input
-            .split_whitespace()
-            .map(|s| Token(s.to_owned()))
-            .collect()
+        let mut result = Vec::new();
+        let mut string = String::new();
+        let mut space_prev = true;
+
+        for c in input.chars() {
+            let space_curr = !c.is_alphanumeric();
+
+            if space_curr != space_prev {
+                if !string.chars().all(char::is_whitespace) {
+                    result.push(Token(string));
+                }
+
+                string = String::new();
+            }
+
+            space_prev = space_curr;
+            string.push(c);
+        }
+
+        if !string.chars().all(char::is_whitespace) {
+            result.push(Token(string));
+        }
+
+        result
     }
 
     fn join(tokens: &[Token]) -> String {
-        tokens
-            .iter()
-            .map(|t| t.0.clone())
-            .collect::<Vec<_>>()
-            .join(" ")
+        let mut result = String::new();
+        let mut space_prev = true;
+
+        for token in tokens {
+            let space_curr = !token.0.chars().any(char::is_alphanumeric);
+
+            if !space_prev && !space_curr {
+                result.push(' ');
+            }
+
+            space_prev = space_curr;
+            result.push_str(&token.0);
+        }
+
+        result
+    }
+}
+
+impl DataNode {
+    fn new() -> DataNode {
+        DataNode {
+            weight: 0,
+            map: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, tokens: &[Token]) {
+        self.weight += 1;
+
+        if let Some((first, rest)) = tokens.split_first() {
+            self.map
+                .entry(first.to_owned())
+                .or_insert_with(DataNode::new)
+                .insert(rest);
+        }
+    }
+
+    fn get(&self, tokens: &[Token]) -> Option<&DataNode> {
+        if let Some((first, rest)) = tokens.split_first() {
+            self.map.get(first).and_then(|node| node.get(rest))
+        } else {
+            Some(self)
+        }
     }
 }
 
 impl DataSet {
     fn new() -> DataSet {
         DataSet {
-            hash_map: HashMap::new(),
+            root: DataNode::new(),
         }
     }
 
     fn insert(&mut self, tokens: &[Token], max: usize) {
-        for size in 1..=max {
-            for window in tokens.windows(size + 1) {
-                if let Some((last, key)) = window.split_last() {
-                    let map = self.hash_map.entry(key.to_owned()).or_default();
-                    *map.entry(last.clone()).or_default() += 1;
-                }
-            }
+        for index in 0..tokens.len() {
+            let end = tokens.len().min(index + max + 1);
+
+            self.root.insert(&tokens[index..end]);
         }
     }
 
-    fn get(&self, tokens: &[Token], context: usize) -> Option<&HashMap<Token, usize>> {
-        for start in tokens.len().saturating_sub(context)..tokens.len() {
-            if let Some(result) = self.hash_map.get(&tokens[start..]) {
-                return Some(result);
+    fn get(&self, tokens: &[Token]) -> Option<&DataNode> {
+        for index in 0..tokens.len() {
+            if let Some(node) = self.root.get(&tokens[index..]) {
+                if !node.map.is_empty() {
+                    return Some(node);
+                }
             }
         }
 
-        return None;
+        None
     }
 }
 
 impl Generator {
-    fn new(data_set: DataSet, context: usize) -> Generator {
+    fn new(data_set: DataSet, depth: usize) -> Generator {
         Generator {
             max: 100,
             data_set,
-            context,
+            depth,
         }
     }
 
@@ -105,10 +191,21 @@ impl Generator {
             return None;
         }
 
-        let options = self.data_set.get(tokens, self.context)?;
-        let options = options.iter().collect::<Vec<_>>();
-        let mut rng = rand::thread_rng();
-        options.choose(&mut rng).map(|t| t.0).cloned()
+        let begin = tokens.len().saturating_sub(self.depth);
+        let options = self.data_set.get(&tokens[begin..])?;
+        let options = options.map.iter().collect::<Vec<_>>();
+        let total = options.iter().map(|(_, n)| n.weight).sum();
+        let mut index = rand::thread_rng().gen_range(0..total);
+
+        for (token, node) in options {
+            if index < node.weight {
+                return Some(token.clone());
+            }
+
+            index -= node.weight;
+        }
+
+        unreachable!();
     }
 
     fn gen(&self, input: &str) -> String {
@@ -122,29 +219,91 @@ impl Generator {
     }
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let args = Args::parse();
+fn run(args: &BotArgs, generator: Generator) -> Result<()> {
+    let client = reqwest::blocking::Client::new();
+    let bearer = format!("Bearer {}", args.key);
+    let pair = Arc::new((Mutex::new(0), Condvar::new()));
+    let generator = Arc::new(generator);
+
+    for room in args.room.iter().copied() {
+        let pair = Arc::clone(&pair);
+        let generator = Arc::clone(&generator);
+
+        client
+            .post(format!("http://localhost:3000/chat/id/{}/members", room))
+            .header("Authorization", &bearer)
+            .send()?;
+
+        rust_socketio::ClientBuilder::new("http://localhost:3000")
+            .opening_header("Authorization", bearer.clone())
+            .namespace("/room")
+            .on("message", move |data, socket| {
+                if let Payload::String(string) = data {
+                    let v: Value = serde_json::from_str(&string).unwrap();
+                    let content = v["content"].as_str().unwrap();
+
+                    if content.starts_with("/ramble ") {
+                        let result = generator.gen(&content[8..]);
+                        socket.emit("message", json!(result)).unwrap();
+                    }
+                }
+            })
+            .on("open", move |_, socket| {
+                socket.emit("join", json!({ "id": room })).unwrap();
+            })
+            .on("error", move |data, _| {
+                eprintln!("Error: {:?}", data);
+            })
+            .on("close", move |_, _| {
+                let (lock, cvar) = &*pair;
+                let mut count = lock.lock().unwrap();
+                *count += 1;
+                cvar.notify_one();
+            })
+            .connect()?;
+    }
+
+    let (lock, cvar) = &*pair;
+    let mut count = lock.lock().unwrap();
+
+    while *count < args.room.len() {
+        count = cvar.wait(count).unwrap();
+    }
+
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let args = <Args as clap::Parser>::parse();
+    let depth = args.depth.unwrap_or(3);
+
+    let mut data_set = if let Some(path) = args.data_set {
+        let string = fs::read(path)?;
+        serde_json::from_slice(&string)?
+    } else {
+        DataSet::new()
+    };
+
+    for path in args.input {
+        let string = fs::read_to_string(&path)?;
+        let tokens = Token::split(&string);
+        data_set.insert(&tokens, depth);
+    }
 
     match args.action {
-        Action::DataSet { input, output } => {
-            let mut data_set = DataSet::new();
-
-            for path in input {
-                let file = fs::read_to_string(&path)?;
-                let tokens = Token::split(&file);
-                data_set.insert(&tokens, 3);
-            }
-
-            let string = serde_json::to_string(&data_set)?;
-            fs::write(output, &string)?;
+        Action::Write { output } => {
+            let string = serde_json::to_vec(&data_set)?;
+            fs::write(output, string)?;
         }
-        Action::Generate { data_set, text } => {
-            let string = fs::read_to_string(&data_set)?;
-            let data_set = serde_json::from_str(&string)?;
-            let generator = Generator::new(data_set, 3);
+        Action::Generate { text } => {
+            let generator = Generator::new(data_set, depth);
             println!("{}", generator.gen(&text));
         }
-    }
+        Action::Bot(bot_args) => {
+            let generator = Generator::new(data_set, depth);
+            run(&bot_args, generator)?;
+        }
+    };
 
     Ok(())
 }
