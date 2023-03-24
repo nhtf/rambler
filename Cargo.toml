@@ -1,14 +1,19 @@
 [package]
-name = "bot"
+name = "rambler"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release]
+debug = true
+
 [dependencies]
-clap = { version = "4.1.8", features = ["derive"] }
+clap = { version = "4.1.8", features = ["derive", "env"] }
+hashbrown = { version = "0.13.2", features = ["serde"] }
 rand = "0.8.5"
 reqwest = "0.11.15"
+rmp-serde = "1.1.1"
 rust_socketio = "0.4.1"
 serde = { version = "1.0.156", features = ["derive"] }
 serde_json = "1.0.94"

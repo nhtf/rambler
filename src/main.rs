@@ -1,11 +1,13 @@
 use rand::prelude::*;
+use rust_socketio::payload::Payload;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use rust_socketio::payload::Payload;
-use std::collections::HashMap;
+use std::collections::VecDeque;
+use hashbrown::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
+use std::io::{BufRead, BufReader};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -15,8 +17,8 @@ struct Args {
     input: Vec<PathBuf>,
     #[arg(short, long)]
     data_set: Option<PathBuf>,
-    #[arg(long)]
-    depth: Option<usize>,
+    #[arg(long, default_value_t = 3)]
+    depth: usize,
     #[command(subcommand)]
     action: Action,
 }
@@ -36,28 +38,40 @@ enum Action {
 
 #[derive(clap::Args, Debug)]
 struct BotArgs {
-    #[arg(short, long)]
+    #[arg(short, long, env = "RAMBLER_KEY")]
     key: String,
     #[arg(short, long)]
     room: Vec<u64>,
 }
 
-#[derive(Clone, Hash, PartialEq, Eq, Serialize, Deserialize, Debug)]
-struct Token(String);
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(from = "Vec<String>")]
+#[serde(into = "Vec<String>")]
+struct TokenData {
+    vec: Vec<String>,
+    map: HashMap<String, usize>,
+}
+
+struct TokenSplit<I> {
+    inner: I,
+    string: String,
+    space_prev: bool,
+}
 
 #[derive(Serialize, Deserialize)]
 struct DataNode {
-    #[serde(default = "one")]
-    #[serde(skip_serializing_if = "is_one")]
-    #[serde(rename = "")]
+    // #[serde(default = "one")]
+    // #[serde(skip_serializing_if = "is_one")]
+    // #[serde(rename = "w")]
     weight: usize,
-    #[serde(flatten)]
-    map: HashMap<Token, DataNode>,
+    // #[serde(rename = "m")]
+    map: HashMap<usize, DataNode>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct DataSet {
     root: DataNode,
+    data: TokenData,
 }
 
 struct Generator {
@@ -66,6 +80,7 @@ struct Generator {
     data_set: DataSet,
 }
 
+/*
 fn one() -> usize {
     1
 }
@@ -73,51 +88,117 @@ fn one() -> usize {
 fn is_one(v: &usize) -> bool {
     *v == 1
 }
+*/
 
-impl Token {
-    fn split(input: &str) -> Vec<Token> {
-        let mut result = Vec::new();
-        let mut string = String::new();
-        let mut space_prev = true;
+fn token_split<I: IntoIterator<Item = char>>(input: I) -> TokenSplit<I> {
+    TokenSplit {
+        inner: input,
+        string: String::new(),
+        space_prev: true,
+    }
+}
 
-        for c in input.chars() {
-            let space_curr = !c.is_alphanumeric();
+fn token_join(tokens: &[String]) -> String {
+    let mut result = String::new();
+    let mut space_prev = true;
 
-            if space_curr != space_prev {
-                if !string.chars().all(char::is_whitespace) {
-                    result.push(Token(string));
-                }
+    for token in tokens {
+        let space_curr = !token.chars().any(char::is_alphanumeric);
 
-                string = String::new();
-            }
-
-            space_prev = space_curr;
-            string.push(c);
+        if !space_prev && !space_curr {
+            result.push(' ');
         }
 
-        if !string.chars().all(char::is_whitespace) {
-            result.push(Token(string));
-        }
-
-        result
+        space_prev = space_curr;
+        result.push_str(&token);
     }
 
-    fn join(tokens: &[Token]) -> String {
-        let mut result = String::new();
-        let mut space_prev = true;
+    result
+}
 
-        for token in tokens {
-            let space_curr = !token.0.chars().any(char::is_alphanumeric);
+impl TokenData {
+    fn new() -> TokenData {
+        TokenData {
+            vec: Vec::new(),
+            map: HashMap::new(),
+        }
+    }
 
-            if !space_prev && !space_curr {
-                result.push(' ');
-            }
+    fn insert(&mut self, token: String) -> usize {
+        *self.map.entry(token)
+            .or_insert_with_key(|token| {
+                self.vec.push(token.clone());
+                self.vec.len() - 1
+            })
+    }
 
-            space_prev = space_curr;
-            result.push_str(&token.0);
+    fn get_by_token(&self, token: &str) -> Option<usize> {
+        self.map.get(token).copied()
+    }
+
+    fn get_by_index(&self, index: usize) -> &str {
+        &self.vec[index]
+    }
+
+    fn shrink(&mut self) {
+        self.vec.shrink_to_fit();
+        self.map.shrink_to_fit();
+    }
+}
+
+impl From<Vec<String>> for TokenData {
+    fn from(vec: Vec<String>) -> TokenData {
+        let mut map = HashMap::new();
+
+        for (i, token) in vec.iter().enumerate() {
+            map.insert(token.clone(), i);
         }
 
-        result
+        TokenData {
+            vec,
+            map,
+        }
+    }
+}
+
+impl Into<Vec<String>> for TokenData {
+    fn into(self) -> Vec<String> {
+        self.vec
+    }
+}
+
+impl<I: Iterator<Item = char>> Iterator for TokenSplit<I> {
+    type Item = String;
+    
+    fn next(&mut self) -> Option<String> {
+        while let Some(c) = self.inner.next() {
+            let space_curr = !c.is_alphanumeric();
+            let mut result = None;
+
+            if space_curr != self.space_prev {
+                let string = self.string.clone();
+                self.string.clear();
+
+                if !string.chars().all(char::is_whitespace) {
+                    result = Some(string);
+                }
+            }
+
+            self.space_prev = space_curr;
+            self.string.push(c);
+
+            if result.is_some() {
+                return result;
+            }
+        }
+        
+        let string = std::mem::take(&mut self.string);
+
+        if !string.chars().all(char::is_whitespace) {
+            Some(string)
+        } else {
+            None
+        }
     }
 }
 
@@ -129,22 +210,49 @@ impl DataNode {
         }
     }
 
-    fn insert(&mut self, tokens: &[Token]) {
-        self.weight += 1;
+    fn with_tokens(tokens: impl IntoIterator<Item = usize>) -> DataNode {
+        let mut tokens = tokens.into_iter();
 
-        if let Some((first, rest)) = tokens.split_first() {
-            self.map
-                .entry(first.to_owned())
-                .or_insert_with(DataNode::new)
-                .insert(rest);
+        let map = if let Some(first) = tokens.next() {
+            let mut map = HashMap::new();
+            map.insert(first, DataNode::with_tokens(tokens));
+            map
+        } else {
+            HashMap::new()
+        };
+
+        DataNode {
+            weight: 1,
+            map,
         }
     }
 
-    fn get(&self, tokens: &[Token]) -> Option<&DataNode> {
+    fn insert(&mut self, tokens: impl IntoIterator<Item = usize>) {
+        use hashbrown::hash_map::Entry;
+
+        let mut tokens = tokens.into_iter();
+
+        self.weight += 1;
+
+        if let Some(first) = tokens.next() {
+            match self.map.entry(first) {
+                Entry::Occupied(mut occ) => { occ.get_mut().insert(tokens); },
+                Entry::Vacant(vac) => { vac.insert(DataNode::with_tokens(tokens)); },
+            }
+        }
+    }
+
+    fn get(&self, tokens: &[usize]) -> Option<&DataNode> {
         if let Some((first, rest)) = tokens.split_first() {
             self.map.get(first).and_then(|node| node.get(rest))
         } else {
             Some(self)
+        }
+    }
+
+    fn shrink(&mut self) {
+        for node in self.map.values_mut() {
+            node.shrink();
         }
     }
 }
@@ -153,20 +261,47 @@ impl DataSet {
     fn new() -> DataSet {
         DataSet {
             root: DataNode::new(),
+            data: TokenData::new(),
         }
     }
 
-    fn insert(&mut self, tokens: &[Token], max: usize) {
-        for index in 0..tokens.len() {
-            let end = tokens.len().min(index + max + 1);
+    fn insert(&mut self, tokens: impl IntoIterator<Item = String>, max: usize) {
+        let mut buffer = VecDeque::with_capacity(max + 1);
+        let mut tokens = tokens.into_iter();
 
-            self.root.insert(&tokens[index..end]);
+        while buffer.len() < max {
+            if let Some(token) = tokens.next() {
+                buffer.push_back(self.data.insert(token));
+            } else {
+                break;
+            }
+        }
+
+        while let Some(token) = tokens.next() {
+            buffer.push_back(self.data.insert(token));
+            self.root.insert(buffer.iter().cloned());
+            buffer.pop_front();
+        }
+
+        while buffer.len() > 0 {
+            self.root.insert(buffer.iter().cloned());
+            buffer.pop_front();
         }
     }
 
-    fn get(&self, tokens: &[Token]) -> Option<&DataNode> {
-        for index in 0..tokens.len() {
-            if let Some(node) = self.root.get(&tokens[index..]) {
+    fn get(&self, tokens: &[String]) -> Option<&DataNode> {
+        let mut indices = Vec::new();
+
+        for token in tokens {
+            if let Some(index) = self.data.get_by_token(token) {
+                indices.push(index);
+            } else {
+                indices.clear();
+            }
+        }
+
+        for index in 0..indices.len() {
+            if let Some(node) = self.root.get(&indices[index..]) {
                 if !node.map.is_empty() {
                     return Some(node);
                 }
@@ -174,6 +309,11 @@ impl DataSet {
         }
 
         None
+    }
+
+    fn shrink(&mut self) {
+        self.root.shrink();
+        self.data.shrink();
     }
 }
 
@@ -186,7 +326,7 @@ impl Generator {
         }
     }
 
-    fn next(&self, tokens: &[Token]) -> Option<Token> {
+    fn next(&self, tokens: &[String]) -> Option<String> {
         if tokens.len() >= self.max {
             return None;
         }
@@ -199,7 +339,7 @@ impl Generator {
 
         for (token, node) in options {
             if index < node.weight {
-                return Some(token.clone());
+                return Some(self.data_set.data.get_by_index(*token).to_owned());
             }
 
             index -= node.weight;
@@ -209,13 +349,13 @@ impl Generator {
     }
 
     fn gen(&self, input: &str) -> String {
-        let mut tokens = Token::split(input);
+        let mut tokens = token_split(input.chars()).collect::<Vec<_>>();
 
         while let Some(token) = self.next(&tokens) {
             tokens.push(token);
         }
 
-        Token::join(&tokens)
+        token_join(&tokens)
     }
 }
 
@@ -275,32 +415,34 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = <Args as clap::Parser>::parse();
-    let depth = args.depth.unwrap_or(3);
 
     let mut data_set = if let Some(path) = args.data_set {
         let string = fs::read(path)?;
-        serde_json::from_slice(&string)?
+        rmp_serde::from_slice(&string)?
     } else {
         DataSet::new()
     };
 
     for path in args.input {
-        let string = fs::read_to_string(&path)?;
-        let tokens = Token::split(&string);
-        data_set.insert(&tokens, depth);
+        let file = fs::File::open(&path)?;
+        let reader = BufReader::new(file);
+        let chars = reader.lines().flat_map(|s| s.unwrap().chars().chain(std::iter::once('\n')).collect::<Vec<_>>());
+        data_set.insert(token_split(chars), args.depth);
     }
+
+    data_set.shrink();
 
     match args.action {
         Action::Write { output } => {
-            let string = serde_json::to_vec(&data_set)?;
+            let string = rmp_serde::to_vec(&data_set)?;
             fs::write(output, string)?;
         }
         Action::Generate { text } => {
-            let generator = Generator::new(data_set, depth);
+            let generator = Generator::new(data_set, args.depth);
             println!("{}", generator.gen(&text));
         }
         Action::Bot(bot_args) => {
-            let generator = Generator::new(data_set, depth);
+            let generator = Generator::new(data_set, args.depth);
             run(&bot_args, generator)?;
         }
     };
