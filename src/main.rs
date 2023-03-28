@@ -63,7 +63,7 @@ struct TokenSplit<I> {
 #[derive(Serialize, Deserialize)]
 struct DataNode {
     weight: u32,
-    map: HashMap<u32, DataNode>,
+    map: HashMap<u32, Box<DataNode>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,7 +222,7 @@ impl DataNode {
 
         let map = if let Some(first) = tokens.next() {
             let mut map = HashMap::new();
-            map.insert(first, DataNode::with_tokens(tokens));
+            map.insert(first, Box::new(DataNode::with_tokens(tokens)));
             map
         } else {
             HashMap::new()
@@ -242,7 +242,7 @@ impl DataNode {
                     occ.get_mut().insert(tokens);
                 }
                 Entry::Vacant(vac) => {
-                    vac.insert(DataNode::with_tokens(tokens));
+                    vac.insert(Box::new(DataNode::with_tokens(tokens)));
                 }
             }
         }
