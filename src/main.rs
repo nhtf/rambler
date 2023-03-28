@@ -454,10 +454,10 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
                         let content = value["content"].as_str().unwrap();
                         let room = value["roomId"].as_u64().unwrap();
 
-                        println!("Rambling about {:?}", content);
-
                         if content.starts_with("/ramble ") {
                             let result = generator.gen(&content[8..]);
+
+                            println!("Rambling about {:?}", &content[8..]);
 
                             client
                                 .post(format!("{}/chat/id/{}/messages", url, room))
