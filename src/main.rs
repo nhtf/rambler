@@ -15,7 +15,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct Args {
     #[arg(short, long)]
     input: Vec<PathBuf>,
-    #[arg(short, long)]
+    #[arg(short, long, env = "RAMBLER_DATA")]
     data_set: Option<PathBuf>,
     #[arg(long, default_value = "3")]
     depth: usize,
@@ -42,7 +42,7 @@ struct BotArgs {
     key: String,
     #[arg(short, long)]
     room: Vec<u64>,
-    #[arg(short, long, default_value = "http://localhost:3000")]
+    #[arg(short, long, env = "RAMBLER_URL", default_value = "http://localhost:3000")]
     url: String,
 }
 
