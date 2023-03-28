@@ -1,13 +1,13 @@
+use hashbrown::{hash_map::Entry, HashMap};
 use rand::prelude::*;
 use rust_socketio::payload::Payload;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
-use hashbrown::HashMap;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex};
 use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -17,7 +17,7 @@ struct Args {
     input: Vec<PathBuf>,
     #[arg(short, long)]
     data_set: Option<PathBuf>,
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value = "3")]
     depth: usize,
     #[command(subcommand)]
     action: Action,
@@ -42,6 +42,8 @@ struct BotArgs {
     key: String,
     #[arg(short, long)]
     room: Vec<u64>,
+    #[arg(short, long, default_value = "http://localhost:3000")]
+    url: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -49,7 +51,7 @@ struct BotArgs {
 #[serde(into = "Vec<String>")]
 struct TokenData {
     vec: Vec<String>,
-    map: HashMap<String, usize>,
+    map: HashMap<String, u32>,
 }
 
 struct TokenSplit<I> {
@@ -60,12 +62,8 @@ struct TokenSplit<I> {
 
 #[derive(Serialize, Deserialize)]
 struct DataNode {
-    // #[serde(default = "one")]
-    // #[serde(skip_serializing_if = "is_one")]
-    // #[serde(rename = "w")]
-    weight: usize,
-    // #[serde(rename = "m")]
-    map: HashMap<usize, DataNode>,
+    weight: u32,
+    map: HashMap<u32, DataNode>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -80,15 +78,28 @@ struct Generator {
     data_set: DataSet,
 }
 
-/*
-fn one() -> usize {
-    1
+#[derive(Debug)]
+enum UpdateAction {
+    Insert = 0,
+    Update = 1,
+    Remove = 2,
 }
 
-fn is_one(v: &usize) -> bool {
-    *v == 1
+#[derive(Debug)]
+enum UpdateSubject {
+    User = 0,
+    Invite = 1,
+    Room = 2,
+    Member = 3,
+    Friend = 4,
+    Message = 5,
+    GameState = 6,
+    Team = 7,
+    Block = 8,
+    Player = 9,
+    Achievement = 10,
+    Score = 11,
 }
-*/
 
 fn token_split<I: IntoIterator<Item = char>>(input: I) -> TokenSplit<I> {
     TokenSplit {
@@ -124,20 +135,19 @@ impl TokenData {
         }
     }
 
-    fn insert(&mut self, token: String) -> usize {
-        *self.map.entry(token)
-            .or_insert_with_key(|token| {
-                self.vec.push(token.clone());
-                self.vec.len() - 1
-            })
+    fn insert(&mut self, token: String) -> u32 {
+        *self.map.entry(token).or_insert_with_key(|token| {
+            self.vec.push(token.clone());
+            self.vec.len() as u32 - 1
+        })
     }
 
-    fn get_by_token(&self, token: &str) -> Option<usize> {
+    fn get_by_token(&self, token: &str) -> Option<u32> {
         self.map.get(token).copied()
     }
 
-    fn get_by_index(&self, index: usize) -> &str {
-        &self.vec[index]
+    fn get_by_index(&self, index: u32) -> &str {
+        &self.vec[index as usize]
     }
 
     fn shrink(&mut self) {
@@ -151,13 +161,10 @@ impl From<Vec<String>> for TokenData {
         let mut map = HashMap::new();
 
         for (i, token) in vec.iter().enumerate() {
-            map.insert(token.clone(), i);
+            map.insert(token.clone(), i as u32);
         }
 
-        TokenData {
-            vec,
-            map,
-        }
+        TokenData { vec, map }
     }
 }
 
@@ -169,7 +176,7 @@ impl Into<Vec<String>> for TokenData {
 
 impl<I: Iterator<Item = char>> Iterator for TokenSplit<I> {
     type Item = String;
-    
+
     fn next(&mut self) -> Option<String> {
         while let Some(c) = self.inner.next() {
             let space_curr = !c.is_alphanumeric();
@@ -191,7 +198,7 @@ impl<I: Iterator<Item = char>> Iterator for TokenSplit<I> {
                 return result;
             }
         }
-        
+
         let string = std::mem::take(&mut self.string);
 
         if !string.chars().all(char::is_whitespace) {
@@ -210,7 +217,7 @@ impl DataNode {
         }
     }
 
-    fn with_tokens(tokens: impl IntoIterator<Item = usize>) -> DataNode {
+    fn with_tokens(tokens: impl IntoIterator<Item = u32>) -> DataNode {
         let mut tokens = tokens.into_iter();
 
         let map = if let Some(first) = tokens.next() {
@@ -221,28 +228,27 @@ impl DataNode {
             HashMap::new()
         };
 
-        DataNode {
-            weight: 1,
-            map,
-        }
+        DataNode { weight: 1, map }
     }
 
-    fn insert(&mut self, tokens: impl IntoIterator<Item = usize>) {
-        use hashbrown::hash_map::Entry;
-
+    fn insert(&mut self, tokens: impl IntoIterator<Item = u32>) {
         let mut tokens = tokens.into_iter();
 
         self.weight += 1;
 
         if let Some(first) = tokens.next() {
             match self.map.entry(first) {
-                Entry::Occupied(mut occ) => { occ.get_mut().insert(tokens); },
-                Entry::Vacant(vac) => { vac.insert(DataNode::with_tokens(tokens)); },
+                Entry::Occupied(mut occ) => {
+                    occ.get_mut().insert(tokens);
+                }
+                Entry::Vacant(vac) => {
+                    vac.insert(DataNode::with_tokens(tokens));
+                }
             }
         }
     }
 
-    fn get(&self, tokens: &[usize]) -> Option<&DataNode> {
+    fn get(&self, tokens: &[u32]) -> Option<&DataNode> {
         if let Some((first, rest)) = tokens.split_first() {
             self.map.get(first).and_then(|node| node.get(rest))
         } else {
@@ -359,58 +365,142 @@ impl Generator {
     }
 }
 
+impl UpdateAction {
+    fn parse(value: u64) -> Option<UpdateAction> {
+        match value {
+            0 => Some(UpdateAction::Insert),
+            1 => Some(UpdateAction::Update),
+            2 => Some(UpdateAction::Remove),
+            _ => None,
+        }
+    }
+}
+
+impl UpdateSubject {
+    fn parse(value: u64) -> Option<UpdateSubject> {
+        match value {
+            0 => Some(UpdateSubject::User),
+            1 => Some(UpdateSubject::Invite),
+            2 => Some(UpdateSubject::Room),
+            3 => Some(UpdateSubject::Member),
+            4 => Some(UpdateSubject::Friend),
+            5 => Some(UpdateSubject::Message),
+            6 => Some(UpdateSubject::GameState),
+            7 => Some(UpdateSubject::Team),
+            8 => Some(UpdateSubject::Block),
+            9 => Some(UpdateSubject::Player),
+            10 => Some(UpdateSubject::Achievement),
+            11 => Some(UpdateSubject::Score),
+            _ => None,
+        }
+    }
+}
+
 fn run(args: &BotArgs, generator: Generator) -> Result<()> {
-    let client = reqwest::blocking::Client::new();
-    let bearer = format!("Bearer {}", args.key);
-    let pair = Arc::new((Mutex::new(0), Condvar::new()));
+    let client = Arc::new(reqwest::blocking::Client::new());
+    let bearer = Arc::new(format!("Bearer {}", args.key));
+    let url = Arc::new(args.url.clone());
     let generator = Arc::new(generator);
 
-    for room in args.room.iter().copied() {
-        let pair = Arc::clone(&pair);
-        let generator = Arc::clone(&generator);
+    let response = client
+        .get(format!("{}/user/me", url))
+        .header("Authorization", &*bearer)
+        .send()?;
+
+    let me: Value = serde_json::from_str(&response.text()?)?;
+    let me_id = me["id"].as_u64().unwrap();
+    let me_username = me["username"].as_str().unwrap();
+
+    println!("My name is {}", me_username);
+
+    let response = client
+        .get(format!("{}/user/me/invites", url))
+        .header("Authorization", &*bearer)
+        .send()?;
+
+    let invites: Value = serde_json::from_str(&response.text()?)?;
+
+    let invites_rooms = invites
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["from"]["id"] != me_id && v["type"] == "ChatRoom")
+        .map(|v| v["room"]["id"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+
+    for room in args.room.iter().copied().chain(invites_rooms) {
+        println!("Joining {}", room);
 
         client
-            .post(format!("http://localhost:3000/chat/id/{}/members", room))
-            .header("Authorization", &bearer)
+            .post(format!("{}/chat/id/{}/members", url, room))
+            .header("Authorization", &*bearer)
             .send()?;
+    }
 
-        rust_socketio::ClientBuilder::new("http://localhost:3000")
-            .opening_header("Authorization", bearer.clone())
-            .namespace("/room")
-            .on("message", move |data, socket| {
-                if let Payload::String(string) = data {
-                    let v: Value = serde_json::from_str(&string).unwrap();
-                    let content = v["content"].as_str().unwrap();
+    rust_socketio::ClientBuilder::new(&*url)
+        .opening_header("Authorization", (*bearer).clone())
+        .namespace("/update")
+        .reconnect(true)
+        .on("update", move |data, _| {
+            if let Payload::String(string) = data {
+                let v: Value = serde_json::from_str(&string).unwrap();
 
-                    if content.starts_with("/ramble ") {
-                        let result = generator.gen(&content[8..]);
-                        socket.emit("message", json!(result)).unwrap();
+                let action = UpdateAction::parse(v["action"].as_u64().unwrap()).unwrap();
+                let subject = UpdateSubject::parse(v["subject"].as_u64().unwrap()).unwrap();
+                let value = &v["value"];
+
+                match (action, subject) {
+                    (UpdateAction::Insert, UpdateSubject::Message) => {
+                        let content = value["content"].as_str().unwrap();
+                        let room = value["roomId"].as_u64().unwrap();
+
+                        println!("Rambling about {:?}", content);
+
+                        if content.starts_with("/ramble ") {
+                            let result = generator.gen(&content[8..]);
+
+                            client
+                                .post(format!("{}/chat/id/{}/messages", url, room))
+                                .header("Authorization", &*bearer)
+                                .header("Content-Type", "application/json")
+                                .body(json!({ "content": result }).to_string())
+                                .send()
+                                .unwrap();
+                        }
+                    }
+                    (UpdateAction::Insert, UpdateSubject::Invite) => {
+                        if value["type"] == "ChatRoom" {
+                            let room = value["room"]["id"].as_u64().unwrap();
+
+                            println!("Joining {}", room);
+
+                            client
+                                .post(format!("{}/chat/id/{}/members", url, room))
+                                .header("Authorization", &*bearer)
+                                .send()
+                                .unwrap();
+                        }
+                    }
+                    (action, subject) => {
+                        println!("I don't know how to {:?} a {:?}", action, subject);
                     }
                 }
-            })
-            .on("open", move |_, socket| {
-                socket.emit("join", json!({ "id": room })).unwrap();
-            })
-            .on("error", move |data, _| {
-                eprintln!("Error: {:?}", data);
-            })
-            .on("close", move |_, _| {
-                let (lock, cvar) = &*pair;
-                let mut count = lock.lock().unwrap();
-                *count += 1;
-                cvar.notify_one();
-            })
-            .connect()?;
+            }
+        })
+        .on("open", move |data, _| {
+            eprintln!("Connection opened: {:?}", data);
+        })
+        .on("error", move |data, _| {
+            eprintln!("Connection error: {:?}", data);
+        })
+        .on("close", move |data, _| {
+            eprintln!("Connection closed: {:?}", data);
+        })
+        .connect()?;
+
+    loop {
+        std::thread::park();
     }
-
-    let (lock, cvar) = &*pair;
-    let mut count = lock.lock().unwrap();
-
-    while *count < args.room.len() {
-        count = cvar.wait(count).unwrap();
-    }
-
-    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -426,7 +516,12 @@ fn main() -> Result<()> {
     for path in args.input {
         let file = fs::File::open(&path)?;
         let reader = BufReader::new(file);
-        let chars = reader.lines().flat_map(|s| s.unwrap().chars().chain(std::iter::once('\n')).collect::<Vec<_>>());
+        let chars = reader.lines().flat_map(|s| {
+            s.unwrap()
+                .chars()
+                .chain(std::iter::once('\n'))
+                .collect::<Vec<_>>()
+        });
         data_set.insert(token_split(chars), args.depth);
     }
 
