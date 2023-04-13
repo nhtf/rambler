@@ -424,7 +424,7 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|v| v["from"]["id"] != me_id && v["type"] == "ChatRoom")
+        .filter(|v| v["from"]["id"] != me_id && v["type"] == "ChatRoomInvite")
         .map(|v| v["room"]["id"].as_u64().unwrap())
         .collect::<Vec<_>>();
 
