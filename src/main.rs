@@ -469,7 +469,7 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
                         }
                     }
                     (UpdateAction::Insert, UpdateSubject::Invite) => {
-                        if value["type"] == "ChatRoom" {
+                        if value["type"] == "ChatRoomInvite" {
                             let room = value["room"]["id"].as_u64().unwrap();
 
                             println!("Joining {}", room);
