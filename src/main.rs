@@ -432,7 +432,7 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
         println!("Joining {}", room);
 
         client
-            .post(format!("{}/chat/id/{}/members", url, room))
+            .post(format!("{}/chat/{}/members", url, room))
             .header("Authorization", &*bearer)
             .send()?;
     }
@@ -460,7 +460,7 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
                             println!("Rambling about {:?}", &content[8..]);
 
                             client
-                                .post(format!("{}/chat/id/{}/messages", url, room))
+                                .post(format!("{}/chat/{}/messages", url, room))
                                 .header("Authorization", &*bearer)
                                 .header("Content-Type", "application/json")
                                 .body(json!({ "content": result }).to_string())
@@ -475,7 +475,7 @@ fn run(args: &BotArgs, generator: Generator) -> Result<()> {
                             println!("Joining {}", room);
 
                             client
-                                .post(format!("{}/chat/id/{}/members", url, room))
+                                .post(format!("{}/chat/{}/members", url, room))
                                 .header("Authorization", &*bearer)
                                 .send()
                                 .unwrap();
